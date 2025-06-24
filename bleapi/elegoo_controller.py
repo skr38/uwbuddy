@@ -11,7 +11,7 @@ from bleak import BleakClient, BleakScanner
 
 class ElegooTumbllerController:
     def __init__(self):
-        self.device_name = "ELEGOO BT16"  # Dein umbenanntes Gerät
+        self.device_name = "CPS-45"  # Dein umbenanntes Gerät
         self.write_characteristic = "0000ffe2-0000-1000-8000-00805f9b34fb"
         self.client = None
         self.connected = False

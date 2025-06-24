@@ -1,5 +1,7 @@
-from anchor_digital_twin import AnchorZoneDigitalTwin
-from bluetooth_orientation_receiver import BluetoothOrientationReceiver
+from orchestrate.location_mqtt import LocationMQTT
+
+from .anchor_digital_twin import AnchorZoneDigitalTwin
+from .bluetooth_orientation_receiver import BluetoothOrientationReceiver
 import time
 
 # Global digital twin instance
@@ -16,9 +18,9 @@ def process_position(node_id, pos):
     
     # Print model summary every few updates
     if hash(node_id) % 10 == 0:  # Print summary occasionally
-        summary = digital_twin.get_model_summary()
-        print(f"🗺️  Model Summary: {summary['total_entities']} entities, "
-              f"{summary['entities_in_zone']} in zone")
+        summary_ = digital_twin.get_model_summary()
+        print(f"🗺️  Model Summary: {summary_['total_entities']} entities, "
+              f"{summary_:['entities_in_zone']} in zone")
 
 def process_orientation(angular_velocity_data):
     """Process incoming angular velocity data from Bluetooth"""
