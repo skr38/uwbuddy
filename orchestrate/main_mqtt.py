@@ -30,7 +30,7 @@ def process_orientation(angular_velocity_data):
 
 
 # Configuration
-BROKER = "10.19.71.27"
+BROKER = "10.19.71.5"
 PORT = 1883
 TOPIC = "dwm/node/+/uplink/location"
 TUMBLLER_NODE_ID = "4c87"
