@@ -95,7 +95,7 @@ class UWBuddyOrchestrator:
                                     'f': 'FORWARD',
                                     's': 'STOP',
                                     'l': 'LEFT',
-                                    'i': 'RIGHT',
+                                    'r': 'RIGHT',
                                     'b': 'BACKWARD'
                                 }
                                 command_name = command_names.get(command, f'UNKNOWN({command})')
@@ -149,6 +149,7 @@ class UWBuddyOrchestrator:
         def mqtt_worker():
             print("MQTT Service gestartet")
             try:
+                # Import der Module
                 from anchor_digital_twin import AnchorZoneDigitalTwin
                 from location_mqtt import LocationMQTT
                 from tumbller_steering_controller import TumbllerSteeringController
@@ -164,14 +165,14 @@ class UWBuddyOrchestrator:
                 self.digital_twin.register_target_person("0cad")
                 print("Digital Twin initialisiert")
                 print("Tracking: Tumbller (4c87), Target Person (0cad)")
-    
+
                 # MQTT Client starten
                 broker_ip = "orehek_wlan-usb-001.iot.private.hm.edu"
                 self.mqtt_client = LocationMQTT(broker_ip, 1883, "dwm/node/+/uplink/location")
                 self.mqtt_client.set_location_callback(self.process_position)
                 self.mqtt_client.start(broker_ip, 1883)
                 print(f"MQTT Client gestartet - Broker: {broker_ip}")
-    
+
                 # Steering Controller mit direkter Message Queue Referenz
                 steering_controller = TumbllerSteeringController(
                     self.digital_twin,
@@ -179,6 +180,7 @@ class UWBuddyOrchestrator:
                 )
                 steering_controller.start(interval=0.5)
                 print("Steering Controller mit Message Queue gestartet")
+                print("WICHTIG: Nur Steering Controller aktiv - keine alte Follow-Logic!")
                 
                 # Hauptschleife
                 while self.running:
@@ -186,18 +188,17 @@ class UWBuddyOrchestrator:
                         print("MQTT Verbindung verloren - versuche Reconnect...")
                         time.sleep(5)
                     time.sleep(1)
-    
+
             except ImportError as e:
                 print(f"MQTT/Digital Twin Module nicht gefunden: {e}")
                 print("MQTT Service läuft im Simulations-Modus")
                 while self.running:
                     time.sleep(1.5)
-    
+
             except Exception as e:
                 print(f"Fehler im MQTT Service: {e}")
-    
-        return threading.Thread(target=mqtt_worker, daemon=True)
 
+        return threading.Thread(target=mqtt_worker, daemon=True)
 
     def process_position(self, node_id, pos):
         """Verarbeitet UWB-Positionsdaten"""
@@ -212,38 +213,25 @@ class UWBuddyOrchestrator:
             self.digital_twin.update_entity_position(node_id, pos)
 
     def start_logic_service(self):
-        """Startet den Logic Service mit verbesserter Ausgabe"""
+        """Startet den Logic Service - NUR für andere Nachrichten, NICHT für Follow-Logic"""
         def logic_worker():
-            print("Logic Service gestartet")
+            print("Logic Service gestartet (ohne Follow-Logic)")
             try:
                 while self.running:
-                    # Verarbeite Nachrichten aus der Queue
+                    # Verarbeite nur ANDERE Nachrichten, NICHT follow_command
                     if not self.message_queue.empty():
                         try:
                             message_type, service, data = self.message_queue.get_nowait()
                             
-                            if message_type == "follow_command":
-                                distance = data.get('distance', 0)
-                                print(f"Follow-Logic: Distanz {distance:.2f}m zwischen Tumbller und Person")
-                                
-                                # Roboter-Befehl generieren
-                                if distance > 3.0:
-                                    command = "f"  # Forward
-                                    action = "FOLGEN (weit entfernt)"
-                                elif distance < 1.0:
-                                    command = "s"  # Stop
-                                    action = "STOPPEN (zu nah)"
-                                else:
-                                    command = "f"  # Slow forward
-                                    action = "LANGSAM FOLGEN"
-                                
-                                print(f"Entscheidung: {action}")
-                                
-                                self.message_queue.put(("robot_command", "ble", {
-                                    "command": command,
-                                    "reason": f"follow_distance_{distance:.1f}m"
-                                }))
-                                
+                            # WICHTIG: follow_command wird IGNORIERT - Steering Controller übernimmt das!
+                            if message_type == "error":
+                                error_msg = data
+                                logger.error(f"Fehler von {service}: {error_msg}")
+                            elif message_type == "status":
+                                status_msg = data
+                                logger.info(f"Status von {service}: {status_msg}")
+                            # Andere Message-Types können hier hinzugefügt werden
+                            
                         except Exception as e:
                             logger.error(f"Fehler bei Message-Verarbeitung: {e}")
                     
