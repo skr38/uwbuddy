@@ -42,8 +42,8 @@ if __name__ == "__main__":
     print("🗺️  Starting Anchor Zone Digital Twin...")
     
     # Configure entity IDs (you'll need to set these based on your actual tags)
-    digital_twin.register_tumbller(TUMBLLER_NODE_ID)  # Replace with actual Tumbller node ID
-    digital_twin.register_target_person(PERSON_NODE_ID)  # Replace with actual person's tag ID
+    digital_twin.register_tumbller(TUMBLLER_NODE_ID)
+    digital_twin.register_target_person(PERSON_NODE_ID)
     
     # Start MQTT for position data
     mqtt_client = LocationMQTT(BROKER, PORT, TOPIC)

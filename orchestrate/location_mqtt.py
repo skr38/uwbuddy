@@ -1,6 +1,7 @@
 import json
 import paho.mqtt.client as mqtt
 import logging
+import time
 
 # Logger für bessere Diagnose
 logger = logging.getLogger('LocationMQTT')
@@ -10,12 +11,16 @@ class LocationMQTT:
         self.client = mqtt.Client()
         self.client.on_connect = self._on_connect
         self.client.on_message = self._on_message
-        self.client.on_disconnect = self._on_disconnect  # Neu hinzugefügt
+        self.client.on_disconnect = self._on_disconnect
         self.topic = topic
         self._location_callback = None
         self.connected = False
         self.broker = broker
         self.port = port
+        
+        # Tracking für spezifische Node-IDs
+        self.tracked_nodes = {"4c87": "Tumbller", "0cad": "Target Person"}
+        self.last_position_update = {}
 
     def _on_connect(self, client, userdata, flags, rc):
         if rc == 0:
@@ -31,143 +36,135 @@ class LocationMQTT:
         self.connected = False
         logger.warning(f"⚠️ MQTT Verbindung getrennt: {rc}")
 
+    def _extract_node_id_from_topic(self, topic):
+        """Extrahiert Node-ID nur aus validen Topic-Formaten"""
+        parts = topic.split('/')
+        
+        # Validiere das erwartete Format: dwm/node/XXXX/uplink/location
+        if (len(parts) == 5 and 
+            parts[0] == "dwm" and 
+            parts[1] == "node" and 
+            parts[3] == "uplink" and 
+            parts[4] == "location"):
+            return parts[2]
+        
+        return None
+
+    def _extract_position_from_payload(self, payload):
+        """Extrahiert Position aus verschiedenen Payload-Strukturen"""
+        pos = None
+        
+        # Struktur 1: {"location": {"position": {...}}}
+        if "location" in payload and isinstance(payload["location"], dict):
+            if "position" in payload["location"]:
+                pos = payload["location"]["position"]
+        
+        # Struktur 2: {"position": {...}}
+        elif "position" in payload:
+            pos = payload["position"]
+        
+        # Struktur 3: Direktes x,y,z Format
+        elif all(key in payload for key in ["x", "y", "z"]):
+            pos = {"x": payload["x"], "y": payload["y"], "z": payload["z"]}
+        
+        # Struktur 4: Nested coordinates
+        elif "coordinates" in payload and isinstance(payload["coordinates"], dict):
+            coords = payload["coordinates"]
+            if all(key in coords for key in ["x", "y", "z"]):
+                pos = {"x": coords["x"], "y": coords["y"], "z": coords["z"]}
+        
+        return pos
+
+    def _validate_position(self, pos):
+        """Validiert und konvertiert Position zu numerischen Werten"""
+        if not pos or not isinstance(pos, dict):
+            return None
+            
+        try:
+            x = float(pos.get('x', 0))
+            y = float(pos.get('y', 0))
+            z = float(pos.get('z', 0))
+            
+            return {"x": x, "y": y, "z": z}
+        except (ValueError, TypeError) as e:
+            logger.error(f"❌ Ungültige Positionskoordinaten: {e}")
+            return None
+
+    def _log_tracked_position(self, node_id, position):
+        """Spezielle Ausgabe für getrackte Node-IDs"""
+        current_time = time.time()
+        
+        if node_id in self.tracked_nodes:
+            device_name = self.tracked_nodes[node_id]
+            
+            # Prüfe ob genug Zeit seit letztem Update vergangen ist (alle 2 Sekunden)
+            if (node_id not in self.last_position_update or 
+                current_time - self.last_position_update[node_id] >= 2.0):
+                
+                print(f"🤖 {device_name} ({node_id}): x={position['x']:.3f}m, y={position['y']:.3f}m, z={position['z']:.3f}m")
+                self.last_position_update[node_id] = current_time
+
     def _on_message(self, client, userdata, msg):
         try:
-            # Debug: Topic und Payload analysieren
-            logger.info(f"🔍 MQTT Topic: {msg.topic}")
-            logger.debug(f"📄 Raw Payload: {msg.payload.decode()}")
-            
             payload = json.loads(msg.payload.decode())
-            logger.debug(f"📊 Parsed Payload: {payload}")
-            
-            # Node-ID aus verschiedenen Quellen extrahieren
-            pos = None
-            node_id = "unknown"
+
+            # Node-ID Extraktion mit verbesserter Prioritätslogik
+            node_id = None
             
             # Priorität 1: Node-ID aus Payload extrahieren
             if "node_id" in payload:
-                node_id = payload["node_id"]
-                logger.debug(f"🏷️  Node-ID aus Payload: {node_id}")
+                node_id = str(payload["node_id"])
             
-            # Priorität 2: Node-ID aus Topic extrahieren (dwm/node/XXXX/uplink/location)
-            elif "/" in msg.topic:
-                topic_parts = msg.topic.split('/')
-                logger.debug(f"📡 Topic Parts: {topic_parts}")
-                
-                if len(topic_parts) >= 3 and topic_parts[1] == "node":
-                    node_id = topic_parts[2]  # Index 2 sollte die Node-ID sein
-                    logger.info(f"🏷️  Node-ID aus Topic extrahiert: {node_id}")
-                else:
-                    logger.warning(f"⚠️ Unerwartetes Topic-Format: {msg.topic}")
+            # Priorität 2: Node-ID aus Topic extrahieren (nur bei validem Format)
+            if not node_id:
+                extracted_id = self._extract_node_id_from_topic(msg.topic)
+                if extracted_id:
+                    node_id = extracted_id
             
             # Priorität 3: Andere mögliche ID-Felder in Payload
-            if node_id == "unknown":
+            if not node_id:
                 for id_field in ["id", "device_id", "tag_id", "node", "source"]:
                     if id_field in payload:
                         node_id = str(payload[id_field])
-                        logger.info(f"🏷️  Node-ID aus Feld '{id_field}': {node_id}")
                         break
-                    
-            # Position aus verschiedenen Payload-Strukturen extrahieren
-            # Struktur 1: {"location": {"position": {...}}}
-            if "location" in payload and "position" in payload["location"]:
-                pos = payload["location"]["position"]
-                logger.debug("📍 Position aus location.position extrahiert")
             
-            # Struktur 2: {"position": {...}}
-            elif "position" in payload:
-                pos = payload["position"]
-                logger.debug("📍 Position aus position extrahiert")
+            # Fallback: Verwende "unknown" als Node-ID
+            if not node_id:
+                node_id = "unknown"
+
+            # Position extrahieren
+            pos = self._extract_position_from_payload(payload)
             
-            # Struktur 3: Direktes x,y,z Format
-            elif all(key in payload for key in ["x", "y", "z"]):
-                pos = {"x": payload["x"], "y": payload["y"], "z": payload["z"]}
-                logger.debug("📍 Position aus direkten x,y,z Koordinaten extrahiert")
-            
-            # Struktur 4: Nested coordinates
-            elif "coordinates" in payload:
-                coords = payload["coordinates"]
-                if all(key in coords for key in ["x", "y", "z"]):
-                    pos = {"x": coords["x"], "y": coords["y"], "z": coords["z"]}
-                    logger.debug("📍 Position aus coordinates extrahiert")
-            
-            # Struktur 5: Alternative Position-Felder
-            elif any(field in payload for field in ["pos", "loc", "xyz"]):
-                for field in ["pos", "loc", "xyz"]:
-                    if field in payload:
-                        field_data = payload[field]
-                        if isinstance(field_data, dict) and all(key in field_data for key in ["x", "y", "z"]):
-                            pos = {"x": field_data["x"], "y": field_data["y"], "z": field_data["z"]}
-                            logger.debug(f"📍 Position aus {field} extrahiert")
-                            break
-                        
-            # Position validieren und callback ausführen
-            if pos and self._location_callback:
-                # Sicherstellen dass Position numerische Werte hat
-                try:
-                    x = float(pos.get('x', 0))
-                    y = float(pos.get('y', 0))
-                    z = float(pos.get('z', 0))
-                    
-                    # Validierte Position
-                    validated_pos = {"x": x, "y": y, "z": z}
-                    
-                    logger.info(f"📍 Position für Node {node_id}: x={x:.3f}, y={y:.3f}, z={z:.3f}")
-                    
-                    # Zusätzliche Metadaten falls verfügbar
-                    if "timestamp" in payload:
-                        logger.debug(f"⏰ Timestamp: {payload['timestamp']}")
-                    if "quality" in payload:
-                        logger.debug(f"📊 Signal Quality: {payload['quality']}")
+            if pos:
+                # Position validieren
+                validated_pos = self._validate_position(pos)
+                
+                if validated_pos:
+                    # Spezielle Ausgabe für getrackte Nodes
+                    self._log_tracked_position(node_id, validated_pos)
                     
                     # Callback ausführen
-                    self._location_callback(node_id, validated_pos)
-                    
-                except (ValueError, TypeError) as e:
-                    logger.error(f"❌ Ungültige Positionskoordinaten: {e}")
-                    logger.error(f"❌ Position war: {pos}")
-            
-            else:
-                logger.warning(f"⚠️ Keine gültige Position gefunden")
-                logger.warning(f"⚠️ Payload-Struktur: {list(payload.keys())}")
-                logger.warning(f"⚠️ Vollständige Payload: {payload}")
-                
-                # Fallback: Alle verfügbaren Felder auflisten
-                logger.info("🔍 Verfügbare Payload-Felder:")
-                for key, value in payload.items():
-                    if isinstance(value, dict):
-                        logger.info(f"   {key}: {list(value.keys())}")
-                    else:
-                        logger.info(f"   {key}: {type(value).__name__}")
-                    
+                    if self._location_callback:
+                        self._location_callback(node_id, validated_pos)
+
         except json.JSONDecodeError as e:
             logger.error(f"❌ JSON Parse Fehler: {e}")
-            logger.error(f"❌ Rohe Nachricht: {msg.payload}")
-            logger.error(f"❌ Topic: {msg.topic}")
             
         except Exception as e:
             logger.error(f"❌ Fehler beim Verarbeiten der MQTT-Nachricht: {e}")
-            logger.error(f"❌ Topic: {msg.topic}")
-            logger.error(f"❌ Payload: {msg.payload}")
-            import traceback
-            logger.error(f"❌ Traceback: {traceback.format_exc()}")
-    
-    
+
     def set_location_callback(self, callback):
         """Register the consumer callback to receive node_id and pos dict."""
         self._location_callback = callback
-        logger.info("✅ Location Callback registriert")
 
     def start(self, broker, port):
         """Startet den MQTT Client"""
         try:
-            logger.info(f"🚀 Starte MQTT Client - Broker: {broker}:{port}")
-            logger.info(f"📡 Topic: {self.topic}")
-            
+            print(f"🚀 Starte MQTT Client - Broker: {broker}:{port}")
+            print(f"📡 Topic: {self.topic}")
+            print(f"👀 Tracking: {', '.join([f'{name} ({id})' for id, name in self.tracked_nodes.items()])}")
             self.client.connect(broker, port, keepalive=60)
             self.client.loop_start()
-            logger.info("✅ MQTT Client gestartet")
-            
         except Exception as e:
             logger.error(f"❌ Fehler beim Starten des MQTT Clients: {e}")
             raise
@@ -175,11 +172,9 @@ class LocationMQTT:
     def stop(self):
         """Stoppt den MQTT Client ordnungsgemäß"""
         try:
-            logger.info("🛑 Stoppe MQTT Client...")
             self.client.loop_stop()
             self.client.disconnect()
             self.connected = False
-            logger.info("✅ MQTT Client gestoppt")
         except Exception as e:
             logger.error(f"❌ Fehler beim Stoppen des MQTT Clients: {e}")
 
@@ -192,9 +187,7 @@ class LocationMQTT:
         try:
             if self.connected:
                 self.client.publish(topic, message)
-                logger.debug(f"📤 Message gesendet zu {topic}: {message}")
             else:
                 logger.error("❌ Kann nicht senden - MQTT nicht verbunden")
         except Exception as e:
             logger.error(f"❌ Fehler beim Senden: {e}")
-
