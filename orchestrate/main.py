@@ -8,6 +8,7 @@ import os
 from concurrent.futures import ThreadPoolExecutor
 from queue import Queue
 import signal
+import asyncio
 
 # KRITISCH: Paho MQTT im Main Thread importieren!
 try:
@@ -55,49 +56,36 @@ class UWBuddyOrchestrator:
         def ble_worker():
             print("BLE Service gestartet")
             try:
-                # Import des BLE Controllers
-                bleapi_path = os.path.join(parent_dir, 'bleapi')
-                sys.path.append(bleapi_path)
                 from elegoo_controller import ElegooTumbllerController
 
                 self.robot_controller = ElegooTumbllerController()
                 print("BLE Controller initialisiert")
 
-                while self.running:
-                    if hasattr(self.robot_controller, 'connected') and self.robot_controller.connected:
-                        # Verarbeite Nachrichten aus der Queue für Roboter-Befehle
-                        if not self.message_queue.empty():
-                            try:
-                                message_type, service, data = self.message_queue.get_nowait()
-                                if message_type == "robot_command" and hasattr(self.robot_controller, 'send_command'):
-                                    command = data.get('command', '')
-                                    reason = data.get('reason', 'unknown')
-                                    
-                                    # Erweiterte Bluetooth-Befehl Ausgabe
-                                    command_names = {
-                                        'f': 'FORWARD',
-                                        's': 'STOP', 
-                                        'l': 'LEFT',
-                                        'r': 'RIGHT',
-                                        'b': 'BACKWARD'
-                                    }
-                                    command_name = command_names.get(command, f'UNKNOWN({command})')
-                                    
-                                    print(f"Bluetooth -> Tumbller: {command_name} (Grund: {reason})")
-                                    self.robot_controller.send_command(command)
-                            except:
-                                pass
-                    else:
-                        time.sleep(2)
-
-            except ImportError as e:
-                print(f"BLE Module nicht gefunden: {e}")
-                print("BLE Service läuft im Simulations-Modus")
+                # Asyncio Event Loop für BLE-Verbindung
+                loop = asyncio.new_event_loop()
+                asyncio.set_event_loop(loop)
                 
-                # Simulation mit Ausgabe
+                # Verbindung herstellen
+                print("Versuche BLE-Verbindung herzustellen...")
+                connected = False
+                try:
+                    connected = loop.run_until_complete(self.robot_controller.connect())
+                    if connected:
+                        print("BLE Controller erfolgreich verbunden")
+                        self.robot_controller.connected = True
+                    else:
+                        print("BLE Controller Verbindung fehlgeschlagen - Simulations-Modus")
+                        self.robot_controller.connected = False
+                except Exception as e:
+                    print(f"BLE Verbindungsfehler: {e}")
+                    print("BLE Service läuft im Simulations-Modus")
+                    self.robot_controller.connected = False
+                    connected = False
+
                 while self.running:
-                    if not self.message_queue.empty():
-                        try:
+                    # Verarbeite Nachrichten aus der Queue für Roboter-Befehle
+                    try:
+                        if not self.message_queue.empty():
                             message_type, service, data = self.message_queue.get_nowait()
                             if message_type == "robot_command":
                                 command = data.get('command', '')
@@ -105,16 +93,54 @@ class UWBuddyOrchestrator:
                                 
                                 command_names = {
                                     'f': 'FORWARD',
-                                    's': 'STOP', 
+                                    's': 'STOP',
+                                    'l': 'LEFT',
+                                    'i': 'RIGHT',
+                                    'b': 'BACKWARD'
+                                }
+                                command_name = command_names.get(command, f'UNKNOWN({command})')
+                                
+                                if connected and hasattr(self.robot_controller, 'send_command'):
+                                    print(f"Bluetooth -> Tumbller: {command_name} (Grund: {reason})")
+                                    try:
+                                        # Async Befehl senden
+                                        loop.run_until_complete(self.robot_controller.send_command(command))
+                                    except Exception as e:
+                                        print(f"Bluetooth Sendefehler: {e}")
+                                        connected = False
+                                        self.robot_controller.connected = False
+                                else:
+                                    print(f"Bluetooth (SIM) -> Tumbller: {command_name} (Grund: {reason})")
+                    except Exception as e:
+                        pass
+                    
+                    time.sleep(0.1)  # Schnelle Queue-Verarbeitung
+
+            except ImportError as e:
+                print(f"BLE Module nicht gefunden: {e}")
+                print("BLE Service läuft im Simulations-Modus")
+                
+                # Simulation mit Ausgabe
+                while self.running:
+                    try:
+                        if not self.message_queue.empty():
+                            message_type, service, data = self.message_queue.get_nowait()
+                            if message_type == "robot_command":
+                                command = data.get('command', '')
+                                reason = data.get('reason', 'unknown')
+                                
+                                command_names = {
+                                    'f': 'FORWARD',
+                                    's': 'STOP',
                                     'l': 'LEFT',
                                     'r': 'RIGHT',
                                     'b': 'BACKWARD'
                                 }
                                 command_name = command_names.get(command, f'UNKNOWN({command})')
                                 print(f"Bluetooth (SIM) -> Tumbller: {command_name} (Grund: {reason})")
-                        except:
-                            pass
-                    time.sleep(2)
+                    except Exception as e:
+                        pass
+                    time.sleep(0.1)
 
         return threading.Thread(target=ble_worker, daemon=True)
 
@@ -146,7 +172,10 @@ class UWBuddyOrchestrator:
                 self.mqtt_client.start(broker_ip, 1883)
                 print(f"MQTT Client gestartet - Broker: {broker_ip}")
 
-                # WICHTIG: Follow-Logic Loop
+                # Follow-Logic Loop mit Rate-Limiting
+                last_command_time = 0
+                command_interval = 3.0  # Alle 3 Sekunden
+                
                 while self.running:
                     if self.digital_twin:
                         try:
@@ -161,41 +190,49 @@ class UWBuddyOrchestrator:
                                 distance = self.digital_twin.calculate_distance_between_entities("4c87", "0cad")
                                 
                                 if distance and distance > 0:
-                                    print(f"Follow-Logic: Distanz {distance:.2f}m zwischen Tumbller und Person")
+                                    current_time = time.time()
                                     
-                                    # Befehl generieren basierend auf Distanz
-                                    if distance >= 0.3:  # Mehr als 1m entfernt
-                                        command = "f"  # Forward
-                                        action = "FOLGEN (zu weit entfernt)"
-                                    elif distance < 0.3:  # Weniger als 0.5m entfernt
-                                        command = "s"  # Stop
-                                        action = "STOPPEN (zu nah)"
-                                    else:
-                                        command = "s"  # Stop - perfekte Distanz
-                                        action = "STOPPEN (perfekte Distanz)"
-                                    
-                                    print(f"Entscheidung: {action}")
-                                    
-                                    # Befehl in Queue einreihen
-                                    self.message_queue.put(("robot_command", "ble", {
-                                        "command": command,
-                                        "reason": f"follow_distance_{distance:.1f}m"
-                                    }))
+                                    # Rate-Limiting: Nur alle X Sekunden einen Befehl senden
+                                    if current_time - last_command_time >= command_interval:
+                                        print(f"Follow-Logic: Distanz {distance:.2f}m zwischen Tumbller und Person")
+                                        
+                                        # Befehl generieren basierend auf Distanz
+                                        if distance > 1.5:  # Mehr als 1.5m entfernt
+                                            command = "f"  # Forward
+                                            action = "FOLGEN (zu weit entfernt)"
+                                        elif distance < 0.8:  # Weniger als 0.8m entfernt
+                                            command = "s"  # Stop
+                                            action = "STOPPEN (zu nah)"
+                                        else:
+                                            command = "s"  # Stop - perfekte Distanz
+                                            action = "STOPPEN (perfekte Distanz)"
+                                        
+                                        print(f"Entscheidung: {action}")
+                                        
+                                        # Befehl in Queue einreihen
+                                        self.message_queue.put(("robot_command", "ble", {
+                                            "command": command,
+                                            "reason": f"follow_distance_{distance:.1f}m"
+                                        }))
+                                        
+                                        last_command_time = current_time
+                                        
                             else:
-                                # Debug: Zeige welche Daten fehlen
-                                if not tumbller_state:
-                                    print("Warte auf Tumbller Position...")
-                                elif not person_state:
-                                    print("Warte auf Target Person Position...")
-                                elif 'position' not in tumbller_state:
-                                    print("Tumbller State hat keine Position")
-                                elif 'position' not in person_state:
-                                    print("Person State hat keine Position")
+                                # Debug: Zeige welche Daten fehlen (nur alle 10 Sekunden)
+                                if int(time.time()) % 10 == 0:
+                                    if not tumbller_state:
+                                        print("Warte auf Tumbller Position...")
+                                    elif not person_state:
+                                        print("Warte auf Target Person Position...")
+                                    elif 'position' not in tumbller_state:
+                                        print("Tumbller State hat keine Position")
+                                    elif 'position' not in person_state:
+                                        print("Person State hat keine Position")
                                 
                         except Exception as e:
                             print(f"Fehler in Follow-Logic: {e}")
 
-                    time.sleep(2)  # Alle 2 Sekunden prüfen
+                    time.sleep(1)  # Alle 1 Sekunde prüfen
 
             except ImportError as e:
                 print(f"MQTT/Digital Twin Module nicht gefunden: {e}")

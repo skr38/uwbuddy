@@ -3,8 +3,8 @@ import time
 import threading
 
 # Import provided modules
-from anchor_zone_digital_twin import AnchorZoneDigitalTwin
-from elegoo_tumbller_controller import ElegooTumbllerController
+from anchor_digital_twin import AnchorZoneDigitalTwin
+from elegoo_controller import ElegooTumbllerController
 from astar_node import AStarNode, astar
 
 # --- Steering Controller ---

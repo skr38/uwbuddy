@@ -18,12 +18,13 @@ class ElegooTumbllerController:
         self.running = True
         self.loop = None
         self.is_moving = False  # Bewegungsstatus verfolgen
-        
+
     async def connect(self):
         """Verbindung zum Elegoo Tumbller herstellen"""
         print(f"Suche nach {self.device_name}...")
         
         try:
+            print("Tryin veuheagbvevoeauhvfbehbvofhf🔍 Suche nach BLE-Geräten...")
             device = await BleakScanner.find_device_by_name(self.device_name)
             if not device:
                 print(f"❌ Gerät {self.device_name} nicht gefunden!")
@@ -144,7 +145,7 @@ class ElegooTumbllerController:
         print("  ⬆️  Pfeil HOCH    = Vorwärts (f)")
         print("  ⬇️  Pfeil RUNTER  = Rückwärts (b)") 
         print("  ⬅️  Pfeil LINKS   = Links drehen (l)")
-        print("  ➡️  Pfeil RECHTS  = Rechts drehen (r)")
+        print("  ➡️  Pfeil RECHTS  = Rechts drehen (i)")
         print("  ⏸️  LEERTASTE     = Pausieren (s)")
         print("  🛑 S             = Explizit stoppen (s)")
         print("  💡 L             = LED ein/aus (a)")
