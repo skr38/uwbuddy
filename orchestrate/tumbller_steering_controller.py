@@ -2,124 +2,152 @@ import math
 import time
 import threading
 
-# Import provided modules
-from anchor_digital_twin import AnchorZoneDigitalTwin
-from elegoo_controller import ElegooTumbllerController
-from astar_node import AStarNode, astar
-
-# --- Steering Controller ---
 class TumbllerSteeringController:
-    def __init__(self, digital_twin: AnchorZoneDigitalTwin, ble_controller: ElegooTumbllerController,
-                 grid_resolution=0.5):
+    """
+    Intelligente Steuerungslogik für den Tumbller mit Richtungsberechnung
+    """
+    
+    def __init__(self, digital_twin, message_queue):
         self.dt = digital_twin
-        self.ble = ble_controller
-        self.grid_res = grid_resolution
+        self.message_queue = message_queue  # Direkte Referenz zur Message Queue
         self.running = False
         self.thread = None
-
-    def _position_to_grid(self, pos):
-        # Convert continuous position to discrete grid cell
-        return (round(pos['x']/self.grid_res), round(pos['y']/self.grid_res))
-
-    def _grid_to_position(self, cell):
-        return {'x': cell[0]*self.grid_res, 'y': cell[1]*self.grid_res}
-
-    def _successors(self, cell):
-        # 4-connected grid
-        moves = [(1,0),( -1,0),(0,1),(0,-1)]
-        for dx, dy in moves:
-            nbr = (cell[0]+dx, cell[1]+dy)
-            cost = math.hypot(dx*self.grid_res, dy*self.grid_res)
-            yield nbr, cost
-
-    def _heuristic(self, cell, goal_cell):
-        return math.hypot((cell[0]-goal_cell[0])*self.grid_res, (cell[1]-goal_cell[1])*self.grid_res)
-
-    def plan_path(self):
-        # Get current positions
-        tumb_state = self.dt.get_tumbller_state()
-        target_state = self.dt.get_target_person_state()
-        if not tumb_state or not target_state:
-            return []
-        start = self._position_to_grid(tumb_state['position'])
-        goal = self._position_to_grid(target_state['position'])
-        path = astar(
-            start,
-            lambda c: c == goal,
-            lambda c: self._successors(c),
-            lambda c: self._heuristic(c, goal)
-        )
-        return path or []
-
-    def _follow_path(self, path):
-        # Send movement commands for each path segment
-        for cell in path[1:]:
-            pos = self._grid_to_position(cell)
-            self._go_to(pos)
-            time.sleep(0.1)
-
-    def _go_to(self, target_pos):
-        # Compute bearing to target
-        tumb_state = self.dt.get_tumbller_state()
-        if not tumb_state:
-            return
-        cur_pos = tumb_state['position']
-        yaw = tumb_state['orientation']['yaw']
-        dx = target_pos['x'] - cur_pos['x']
-        dy = target_pos['y'] - cur_pos['y']
-        desired_angle = math.atan2(dy, dx)
-        # Compute turn angle
-        angle_diff = math.atan2(math.sin(desired_angle - yaw), math.cos(desired_angle - yaw))
-        # Choose left or right
-        if abs(angle_diff) > 0.1:
-            if angle_diff > 0:
-                self.ble.schedule_coroutine(self.ble.left())
+        
+        # Steuerungsparameter
+        self.min_distance = 0.8
+        self.max_distance = 2.0
+        self.angle_threshold = 0.3
+        self.command_interval = 2.0
+        self.last_command_time = 0
+        
+        print(f"Steering Controller initialisiert mit:")
+        print(f"  Digital Twin: {id(self.dt)}")
+        print(f"  Message Queue: {id(self.message_queue)}")
+        
+    def calculate_steering_command(self):
+        """Berechnet optimalen Steuerungsbefehl"""
+        current_time = time.time()
+        
+        # Rate-Limiting
+        if current_time - self.last_command_time < self.command_interval:
+            return None, "rate_limited"
+        
+        # Hole Positionen
+        tumbller_state = self.dt.get_entity_state("4c87")
+        person_state = self.dt.get_entity_state("0cad")
+        
+        if not (tumbller_state and person_state and 
+                'position' in tumbller_state and 'position' in person_state):
+            return None, "missing_positions"
+        
+        tumbller_pos = tumbller_state['position']
+        target_pos = person_state['position']
+        
+        # Distanz und Winkel berechnen
+        dx = target_pos['x'] - tumbller_pos['x']
+        dy = target_pos['y'] - tumbller_pos['y']
+        distance = math.sqrt(dx*dx + dy*dy)
+        target_angle = math.atan2(dy, dx)
+        
+        # Aktuelle Orientierung
+        tumbller_full_state = self.dt.get_tumbller_state()
+        if tumbller_full_state and 'orientation' in tumbller_full_state:
+            current_yaw = tumbller_full_state['orientation']['yaw']
+        else:
+            current_yaw = 0.0
+        
+        # Winkeldifferenz
+        angle_diff = self._normalize_angle(target_angle - current_yaw)
+        
+        # Entscheidung
+        command, reason = self._decide_action(distance, angle_diff)
+        
+        if command:
+            self.last_command_time = current_time
+            
+        return command, reason
+    
+    def _normalize_angle(self, angle):
+        return math.atan2(math.sin(angle), math.cos(angle))
+    
+    def _decide_action(self, distance, angle_diff):
+        if distance < self.min_distance:
+            return "s", f"zu_nah_{distance:.1f}m"
+        
+        if distance > self.max_distance:
+            if abs(angle_diff) > self.angle_threshold:
+                if angle_diff > 0:
+                    return "l", f"links_drehen_{math.degrees(angle_diff):.0f}grad"
+                else:
+                    return "i", f"rechts_drehen_{math.degrees(abs(angle_diff)):.0f}grad"
             else:
-                self.ble.schedule_coroutine(self.ble.right())
-            time.sleep(0.2)
-        # Move forward
-        self.ble.schedule_coroutine(self.ble.forward())
-
-    def start(self, interval=0.5):
+                return "f", f"folgen_{distance:.1f}m"
+        
+        return "s", f"perfekte_distanz_{distance:.1f}m"
+    
+    def start(self, interval=1.0):
         if self.running:
             return
         self.running = True
         self.thread = threading.Thread(target=self._run, args=(interval,), daemon=True)
         self.thread.start()
-
+        print("Tumbller Steering Controller gestartet")
+    
+    def _send_ble_command(self, command, reason):
+        """Sendet BLE-Befehl über die Message Queue"""
+        try:
+            self.message_queue.put(("robot_command", "ble", {
+                "command": command,
+                "reason": reason
+            }))
+            return True
+        except Exception as e:
+            print(f"Fehler beim Senden des Steering-Befehls: {e}")
+            return False
+    
     def _run(self, interval):
         while self.running:
-            path = self.plan_path()
-            if path:
-                self._follow_path(path)
+            try:
+                command, reason = self.calculate_steering_command()
+                
+                if command and reason not in ["rate_limited", "missing_positions"]:
+                    # Debug Info
+                    tumbller_state = self.dt.get_entity_state("4c87")
+                    person_state = self.dt.get_entity_state("0cad")
+                    
+                    if tumbller_state and person_state:
+                        tpos = tumbller_state['position']
+                        ppos = person_state['position']
+                        dx = ppos['x'] - tpos['x']
+                        dy = ppos['y'] - tpos['y']
+                        distance = math.sqrt(dx*dx + dy*dy)
+                        target_angle = math.atan2(dy, dx)
+                        
+                        print(f"Smart Steering: Distanz {distance:.2f}m, "
+                              f"Zielrichtung {math.degrees(target_angle):.0f}°")
+                    
+                    # Action Namen
+                    action_names = {
+                        'f': 'VORWÄRTS',
+                        's': 'STOPPEN',
+                        'l': 'LINKS DREHEN',
+                        'i': 'RECHTS DREHEN'
+                    }
+                    action_name = action_names.get(command, f'UNKNOWN({command})')
+                    print(f"Steering Entscheidung: {action_name} ({reason})")
+                    
+                    # Befehl über Message Queue senden
+                    success = self._send_ble_command(command, reason)
+                    if not success:
+                        print("Warnung: Konnte Steering-Befehl nicht senden")
+                
+            except Exception as e:
+                print(f"Fehler im Steering Controller: {e}")
+            
             time.sleep(interval)
-
+    
     def stop(self):
         self.running = False
         if self.thread:
             self.thread.join()
-
-# --- Example Usage ---
-if __name__ == "__main__":
-    # Initialize components
-    dt = AnchorZoneDigitalTwin(anchor_center=(0,0,0), zone_radius=10.0)
-    bt_ctrl = ElegooTumbllerController()
-    
-    # Connect BLE
-    import asyncio
-    asyncio.run(bt_ctrl.connect())
-    
-    # Register entities manually or via incoming MQTT/BLE updates
-    dt.register_tumbller("tumbller_01")
-    dt.register_target_person("person_01")
-    
-    # Start steering
-    steer_ctrl = TumbllerSteeringController(dt, bt_ctrl)
-    steer_ctrl.start(interval=1.0)
-    
-    try:
-        while True:
-            time.sleep(1)
-    except KeyboardInterrupt:
-        steer_ctrl.stop()
-        asyncio.run(bt_ctrl.disconnect())
+        print("Tumbller Steering Controller gestoppt")

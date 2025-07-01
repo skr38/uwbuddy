@@ -145,105 +145,59 @@ class UWBuddyOrchestrator:
         return threading.Thread(target=ble_worker, daemon=True)
 
     def start_mqtt_service(self):
-        """Startet den MQTT Service mit Digital Twin"""
+        """Startet den MQTT Service mit Digital Twin und Steering Controller"""
         def mqtt_worker():
             print("MQTT Service gestartet")
             try:
-                # Import der MQTT und Digital Twin Module
                 from anchor_digital_twin import AnchorZoneDigitalTwin
                 from location_mqtt import LocationMQTT
-
+                from tumbller_steering_controller import TumbllerSteeringController
+                
                 # Digital Twin initialisieren
                 self.digital_twin = AnchorZoneDigitalTwin(
                     anchor_center=(2.5, 2.5, 1.0),
                     zone_radius=10.0
                 )
-
+                
                 # Tag IDs registrieren
                 self.digital_twin.register_tumbller("4c87")
                 self.digital_twin.register_target_person("0cad")
                 print("Digital Twin initialisiert")
                 print("Tracking: Tumbller (4c87), Target Person (0cad)")
-
+    
                 # MQTT Client starten
                 broker_ip = "orehek_wlan-usb-001.iot.private.hm.edu"
                 self.mqtt_client = LocationMQTT(broker_ip, 1883, "dwm/node/+/uplink/location")
                 self.mqtt_client.set_location_callback(self.process_position)
                 self.mqtt_client.start(broker_ip, 1883)
                 print(f"MQTT Client gestartet - Broker: {broker_ip}")
-
-                # Follow-Logic Loop mit Rate-Limiting
-                last_command_time = 0
-                command_interval = 3.0  # Alle 3 Sekunden
+    
+                # Steering Controller mit direkter Message Queue Referenz
+                steering_controller = TumbllerSteeringController(
+                    self.digital_twin,
+                    self.message_queue  # Direkte Referenz zur Message Queue
+                )
+                steering_controller.start(interval=0.5)
+                print("Steering Controller mit Message Queue gestartet")
                 
+                # Hauptschleife
                 while self.running:
-                    if self.digital_twin:
-                        try:
-                            # Prüfe ob beide Geräte Positionen haben
-                            tumbller_state = self.digital_twin.get_entity_state("4c87")
-                            person_state = self.digital_twin.get_entity_state("0cad")
-                            
-                            if (tumbller_state and person_state and 
-                                'position' in tumbller_state and 'position' in person_state):
-                                
-                                # Distanz berechnen
-                                distance = self.digital_twin.calculate_distance_between_entities("4c87", "0cad")
-                                
-                                if distance and distance > 0:
-                                    current_time = time.time()
-                                    
-                                    # Rate-Limiting: Nur alle X Sekunden einen Befehl senden
-                                    if current_time - last_command_time >= command_interval:
-                                        print(f"Follow-Logic: Distanz {distance:.2f}m zwischen Tumbller und Person")
-                                        
-                                        # Befehl generieren basierend auf Distanz
-                                        if distance > 1.5:  # Mehr als 1.5m entfernt
-                                            command = "f"  # Forward
-                                            action = "FOLGEN (zu weit entfernt)"
-                                        elif distance < 0.8:  # Weniger als 0.8m entfernt
-                                            command = "s"  # Stop
-                                            action = "STOPPEN (zu nah)"
-                                        else:
-                                            command = "s"  # Stop - perfekte Distanz
-                                            action = "STOPPEN (perfekte Distanz)"
-                                        
-                                        print(f"Entscheidung: {action}")
-                                        
-                                        # Befehl in Queue einreihen
-                                        self.message_queue.put(("robot_command", "ble", {
-                                            "command": command,
-                                            "reason": f"follow_distance_{distance:.1f}m"
-                                        }))
-                                        
-                                        last_command_time = current_time
-                                        
-                            else:
-                                # Debug: Zeige welche Daten fehlen (nur alle 10 Sekunden)
-                                if int(time.time()) % 10 == 0:
-                                    if not tumbller_state:
-                                        print("Warte auf Tumbller Position...")
-                                    elif not person_state:
-                                        print("Warte auf Target Person Position...")
-                                    elif 'position' not in tumbller_state:
-                                        print("Tumbller State hat keine Position")
-                                    elif 'position' not in person_state:
-                                        print("Person State hat keine Position")
-                                
-                        except Exception as e:
-                            print(f"Fehler in Follow-Logic: {e}")
-
-                    time.sleep(1)  # Alle 1 Sekunde prüfen
-
+                    if not self.mqtt_client or not self.mqtt_client.is_connected():
+                        print("MQTT Verbindung verloren - versuche Reconnect...")
+                        time.sleep(5)
+                    time.sleep(1)
+    
             except ImportError as e:
                 print(f"MQTT/Digital Twin Module nicht gefunden: {e}")
                 print("MQTT Service läuft im Simulations-Modus")
                 while self.running:
                     time.sleep(1.5)
-
+    
             except Exception as e:
                 print(f"Fehler im MQTT Service: {e}")
-
+    
         return threading.Thread(target=mqtt_worker, daemon=True)
+
 
     def process_position(self, node_id, pos):
         """Verarbeitet UWB-Positionsdaten"""
