@@ -14,15 +14,15 @@ class TumbllerSteeringController:
         self.thread = None
         
         # Steuerungsparameter
-        self.min_distance = 0.2
+        self.min_distance = 0.3
         self.max_distance = 0.8
-        self.angle_threshold = 0.2  # Kleinere Toleranz für präzisere Steuerung
-        self.command_interval = 0.1  # Häufigere Befehle für bessere Kontrolle
+        self.angle_threshold = 0.3  # Kleinere Toleranz für präzisere Steuerung
+        self.command_interval = 0.5  # Häufigere Befehle für bessere Kontrolle
         self.last_command_time = 0
         
         # Zeitbasierte Befehlsparameter
         self.turn_speed = 1.5  # Radiant pro Sekunde (geschätzt)
-        self.max_turn_duration = 1.0  # Maximale Drehzeit pro Befehl
+        self.max_turn_duration = 0.5  # Maximale Drehzeit pro Befehl
         self.max_forward_duration = 0.8  # Maximale Vorwärtszeit pro Befehl
         
         # Orientierungsschätzung
@@ -33,9 +33,9 @@ class TumbllerSteeringController:
         self.calibration_mode = False
         self.calibration_start_pos = None
         
-        # Kalibrierungsparameter
-        self.calibration_interval = 45.0  # Alle 45 Sekunden kalibrieren
-        self.last_calibration = 0
+        # Kalibrierungsparameter - DEAKTIVIERT für Tests
+        self.calibration_interval = 150.0  # Alle 2 Minuten (seltener)
+        self.last_calibration = time.time()  # Starte mit aktueller Zeit
         self.min_movement_for_calibration = 0.2
         
         # Aktive Befehlsverfolgung
@@ -94,17 +94,31 @@ class TumbllerSteeringController:
         return movement_angle
     
     def _should_calibrate(self):
-        """Prüft ob eine Kalibrierung nötig ist"""
-        current_time = time.time()
-        return (current_time - self.last_calibration) > self.calibration_interval
+        """Prüft ob eine Kalibrierung nötig ist - DEAKTIVIERT für Tests"""
+        return False  # Kalibrierung temporär deaktiviert
+        # current_time = time.time()
+        # return (current_time - self.last_calibration) > self.calibration_interval
     
     def _start_calibration(self, tumbller_pos):
-        """Startet Kalibrierungsmodus"""
+        """Startet Kalibrierungsmodus mit korrigierter Logik"""
         self.calibration_mode = True
         self.calibration_start_pos = tumbller_pos.copy()
         self.command_start_time = time.time()
-        print("Starte Orientierungskalibrierung - fahre 2s vorwärts...")
-        return ("f", 2.0), "kalibrierung_vorwaerts_2s"
+        print("Starte Orientierungskalibrierung - fahre 1.5s vorwärts...")
+        
+        # Sende Vorwärts-Befehl
+        self._send_ble_command("f", "kalibrierung_start")
+        
+        # Automatischer Stopp nach 1.5 Sekunden
+        def auto_stop_calibration():
+            time.sleep(1.5)
+            if self.calibration_mode:  # Nur wenn Kalibrierung noch aktiv
+                self._send_ble_command("s", "kalibrierung_stopp")
+                print("Kalibrierung: Stopp-Befehl gesendet")
+        
+        threading.Thread(target=auto_stop_calibration, daemon=True).start()
+        
+        return None, "kalibrierung_gestartet"
     
     def _finish_calibration(self, tumbller_pos):
         """Beendet Kalibrierungsmodus"""
@@ -207,13 +221,13 @@ class TumbllerSteeringController:
         # Aktualisiere Positionshistorie
         self._update_position_history(tumbller_pos)
         
-        # Kalibrierungsmodus
+        # Kalibrierungsmodus - KORRIGIERT!
         if self.calibration_mode:
-            if current_time - self.command_start_time > 3.0:
+            if current_time - self.command_start_time > 3.0:  # Nach 3 Sekunden beenden
                 self._finish_calibration(tumbller_pos)
-                return "s", "kalibrierung_beendet"
+                return "s", "kalibrierung_beendet"  # Sicherheits-Stopp
             else:
-                return None, "kalibrierung_aktiv"
+                return None, "kalibrierung_aktiv"  # Warte auf automatischen Stopp
         
         # Prüfe ob Kalibrierung nötig ist
         if self._should_calibrate():
