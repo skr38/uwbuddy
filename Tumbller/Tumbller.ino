@@ -351,7 +351,7 @@ void loop()
   if (millis() - print_time > 100)
   {
     print_time = millis();
-    Serial.println(kalmanfilter.angle);
+    Serial.println(kalmanfilter.Gyro_z)
   }
   static unsigned long start_time;
   if (millis() - start_time < 10)
